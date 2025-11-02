@@ -37,8 +37,8 @@ Filtered JSON written to ..\MP_Capstone_filtered.spatial.json
 
 This will produce 2 new files:
 
-MP_Capstone.strings.json - this contains all spatial data that does not have special configuration inside the original source file
-MP_Capstone_filtered.spatial.json - this has all of the objects that were checked and required to stay inside the spatial json file
+- MP_Capstone.strings.json - this contains all spatial data that does not have special configuration inside the original source file
+- MP_Capstone_filtered.spatial.json - this has all of the objects that were checked and required to stay inside the spatial json file
 
 # runtime-code
 
