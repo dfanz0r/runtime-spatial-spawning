@@ -43,3 +43,7 @@ This will produce 2 new files:
 # runtime-code
 
 The code required to test this is located in the `runtime-code` folder. You just need to upload the file to the portal website as-is and then you can use whatever spatial data you want in the strings file that was compiled through this tool.
+
+# godot
+
+If you want to mess around with the terrain generator script copy the levels/scripts folders into your portal sdk GodotProject folder
