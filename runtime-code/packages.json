@@ -1,0 +1,19 @@
+{
+  "name": "runtime-spatial-spawning",
+  "version": "1.0.0",
+  "description": "Runtime codebase for runtime spatial spawning system",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dfanz0r/runtime-spatial-spawning.git"
+  },
+  "license": "BSD-3-Clause",
+  "author": "dfanz0r <https://github.com/dfanz0r/>",
+  "type": "commonjs",
+  "main": "runtimeSpawn.ts",
+  "scripts": {
+    "build": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
