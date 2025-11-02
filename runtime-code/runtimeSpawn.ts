@@ -1,5 +1,5 @@
 // Copyright (c) 2025 Matt Sitton (dfanz0r)
-// Licensed under the BSD 3-Clause License.
+// Licensed under the BSD 2-Clause License.
 // See the LICENSE file in the project root for full license information.
 const STR_CHUNK_SIZE = 200; // Number of encoded characters per string chunk
 const DECODE_CHUNK_SIZE = STR_CHUNK_SIZE / 2; // Number of decoded bytes per character chunk

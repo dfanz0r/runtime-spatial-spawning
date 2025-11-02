@@ -1,3 +1,4 @@
+// This was generate from portal sdk headers. Do not edit manually.
 public enum RuntimeSpawn_Abbasid
 {
     ACModule_01 = 0,

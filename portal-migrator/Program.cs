@@ -1,4 +1,6 @@
-﻿
+﻿// Copyright (c) 2025 Matt Sitton (dfanz0r)
+// Licensed under the BSD 2-Clause License.
+// See the LICENSE file in the project root for full license information.
 using System;
 using System.Collections.Generic;
 using System.IO;

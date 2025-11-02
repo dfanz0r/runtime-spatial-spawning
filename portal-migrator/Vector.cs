@@ -1,8 +1,11 @@
+// Copyright (c) 2025 Matt Sitton (dfanz0r)
+// Licensed under the BSD 2-Clause License.
+// See the LICENSE file in the project root for full license information.
 using System;
 using System.IO;
 using System.Text.Json.Serialization;
 using System.Globalization;
-// C# classes that represent the structure of your JSON data
+
 public class Vector
 {
     [JsonPropertyName("x")]
@@ -112,7 +115,6 @@ public class Vector
 
     public override string ToString()
     {
-        // Use InvariantCulture to ensure '.' is used as the decimal separator
         return $"new Vector({X.ToString(CultureInfo.InvariantCulture)}, {Y.ToString(CultureInfo.InvariantCulture)}, {Z.ToString(CultureInfo.InvariantCulture)})";
     }
 
