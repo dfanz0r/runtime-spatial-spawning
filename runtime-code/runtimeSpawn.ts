@@ -650,19 +650,6 @@ export function OnGameModeStarted(): void {
     console.log("Parser ready. Chunk processing will happen incrementally during updates.");
 }
 
-// TODO - We should probably manually track vehicles like players to avoid overhead
-// and potential memory leaks from the runtime
-export function OngoingVehicle(vehicle: mod.Vehicle): void {
-    if (!objectManager) return;
-    const vehId = mod.GetObjId(vehicle);
-    if (!vehKeyMap.get(vehId)) vehKeyMap.set(vehId, `vehicle_${vehId}`);
-    const position = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
-    const key = vehKeyMap.get(vehId);
-    if (key) {
-        objectManager.addOrUpdateTrackedPoint(key, position);
-    }
-}
-
 /**
  * Global update loop. Continues parsing chunks incrementally until complete,
  * then manages object spawning for all subsequent updates.
@@ -687,10 +674,13 @@ export function OngoingGlobal(): void {
     }
 
     if (objectManager) {
+        let foundPlayers = 0;
         for (let playerId = 0; playerId < players.length; ++playerId) {
+            if (foundPlayers >= playerCount) break;
             const player = players[playerId];
 
             if (!player) continue;
+            foundPlayers++;
 
             if (!playerDeployments[playerId]) continue;
 
@@ -698,6 +688,15 @@ export function OngoingGlobal(): void {
             const key = playerKeyMap.get(playerId);
             if (key) {
                 objectManager.addOrUpdateTrackedPoint(key, playerPos);
+            }
+        }
+
+        for (let [vehId, vehicle] of vehicles) {
+            if (!vehicle) continue;
+            const vehPos = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
+            const key = vehKeyMap.get(vehId);
+            if (key) {
+                objectManager.addOrUpdateTrackedPoint(key, vehPos);
             }
         }
 
@@ -709,10 +708,13 @@ export function OngoingGlobal(): void {
 const playerKeyMap: Map<number, string> = new Map<number, string>();
 const vehKeyMap: Map<number, string> = new Map<number, string>();
 
-// Manually track players to avoid having to either call AllPlayers/OngoingPlayer
+// Manually track players and vehicles to avoid having to either call AllPlayers/OngoingPlayer
 // which would add significant overhead per update loop and risk memory leaks
 const players = Array<mod.Player | undefined>(256);
 const playerDeployments = Array<boolean>(256);
+let playerCount = 0;
+
+const vehicles = new Map<number, mod.Vehicle>();
 
 export function OnPlayerDeployed(player: mod.Player): void {
     const playerId = mod.GetObjId(player);
@@ -724,12 +726,30 @@ export function OnPlayerUndeploy(player: mod.Player): void {
     playerDeployments[playerId] = false;
 }
 
+// This will trigger when a Vehicle is destroyed.
+export function OnVehicleDestroyed(vehicle: mod.Vehicle): void {
+    const vehId = mod.GetObjId(vehicle);
+    if (!vehKeyMap.get(vehId)) vehKeyMap.set(vehId, `vehicle_${vehId}`);
+    vehicles.delete(vehId);
+    objectManager?.removeTrackedPoint(vehKeyMap.get(vehId)!);
+    console.log(`Vehicle ${vehId} Destroyed! ${vehKeyMap.get(vehId)}`);
+}
+
+// This will trigger when a Vehicle is called into the map.
+export function OnVehicleSpawned(vehicle: mod.Vehicle): void {
+    const vehId = mod.GetObjId(vehicle);
+    if (!vehKeyMap.get(vehId)) vehKeyMap.set(vehId, `vehicle_${vehId}`);
+    vehicles.set(vehId, vehicle);
+    console.log(`Vehicle ${vehId} Spawned! ${vehKeyMap.get(vehId)}`);
+}
+
 export function OnPlayerJoinGame(player: mod.Player): void {
     const playerId = mod.GetObjId(player);
     const playerKey: string = `player_${playerId}`;
     playerKeyMap.set(playerId, playerKey);
     players[playerId] = player;
     playerDeployments[playerId] = false;
+    playerCount++;
 
     console.log(`Player ${playerId} Joined!`);
 }
@@ -744,5 +764,6 @@ export function OnPlayerLeaveGame(playerId: number): void {
     playerKeyMap.delete(playerId);
     players[playerId] = undefined;
     playerDeployments[playerId] = false;
+    playerCount--;
     console.log(`Player ${playerId} Left!`);
 }
