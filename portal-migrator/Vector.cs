@@ -9,27 +9,27 @@ using System.Globalization;
 public class Vector
 {
     [JsonPropertyName("x")]
-    public float X { get; set; }
+    public double X { get; set; }
     [JsonPropertyName("y")]
-    public float Y { get; set; }
+    public double Y { get; set; }
     [JsonPropertyName("z")]
-    public float Z { get; set; }
+    public double Z { get; set; }
 
-    public float Magnitude() => (float)Math.Sqrt(X * X + Y * Y + Z * Z);
+    public double Magnitude() => Math.Sqrt(X * X + Y * Y + Z * Z);
 
     // Componentwise min and max
-    public static Vector Min(Vector a, Vector b) => new Vector { X = Math.Min(a.X, b.X), Y = Math.Min(a.Y, b.Y), Z = Math.Min(a.Z, b.Z) };
-    public static Vector Max(Vector a, Vector b) => new Vector { X = Math.Max(a.X, b.X), Y = Math.Max(a.Y, b.Y), Z = Math.Max(a.Z, b.Z) };
+    public static Vector Min(Vector a, Vector b) => new() { X = Math.Min(a.X, b.X), Y = Math.Min(a.Y, b.Y), Z = Math.Min(a.Z, b.Z) };
+    public static Vector Max(Vector a, Vector b) => new() { X = Math.Max(a.X, b.X), Y = Math.Max(a.Y, b.Y), Z = Math.Max(a.Z, b.Z) };
 
     // Binary serialization methods
-    public void WriteTo(BinaryWriter writer)
+    public void WriteToAsFloat(BinaryWriter writer)
     {
-        writer.Write(X);
-        writer.Write(Y);
-        writer.Write(Z);
+        writer.Write((float)X);
+        writer.Write((float)Y);
+        writer.Write((float)Z);
     }
 
-    public static Vector ReadFrom(BinaryReader reader)
+    public static Vector ReadFromAsFloat(BinaryReader reader)
     {
         return new Vector
         {
@@ -62,14 +62,14 @@ public class Vector
     // Operators
     public static Vector operator +(Vector a, Vector b) => new Vector { X = a.X + b.X, Y = a.Y + b.Y, Z = a.Z + b.Z };
     public static Vector operator -(Vector a, Vector b) => new Vector { X = a.X - b.X, Y = a.Y - b.Y, Z = a.Z - b.Z };
-    public static Vector operator *(Vector v, float s) => new Vector { X = v.X * s, Y = v.Y * s, Z = v.Z * s };
-    public static Vector operator /(Vector v, float s) => new Vector { X = v.X / s, Y = v.Y / s, Z = v.Z / s };
+    public static Vector operator *(Vector v, double s) => new Vector { X = v.X * s, Y = v.Y * s, Z = v.Z * s };
+    public static Vector operator /(Vector v, double s) => new Vector { X = v.X / s, Y = v.Y / s, Z = v.Z / s };
 
     // Componentwise multiply
     public Vector Multiply(Vector other) => new Vector { X = X * other.X, Y = Y * other.Y, Z = Z * other.Z };
 
     // Quantization methods
-    public (ushort, ushort, ushort) Quantize(float scale, float maxValue)
+    public (ushort, ushort, ushort) Quantize(double scale, double maxValue)
     {
         return (
             (ushort)Math.Clamp(X / scale * maxValue, 0, maxValue),
@@ -78,7 +78,7 @@ public class Vector
         );
     }
 
-    public static Vector Dequantize(Vector quantized, float scale, float maxValue)
+    public static Vector Dequantize(Vector quantized, double scale, double maxValue)
     {
         return new Vector
         {
@@ -88,7 +88,17 @@ public class Vector
         };
     }
 
-    public (ushort, ushort, ushort) QuantizeRotation(float range, float offset, float maxValue)
+    public static Vector Round(Vector v, int decimals)
+    {
+        return new Vector
+        {
+            X = Math.Round(v.X, decimals),
+            Y = Math.Round(v.Y, decimals),
+            Z = Math.Round(v.Z, decimals)
+        };
+    }
+
+    public (ushort, ushort, ushort) QuantizeRotation(double range, double offset, double maxValue)
     {
         return (
             (ushort)Math.Clamp((X + offset) / range * maxValue, 0, maxValue),
@@ -97,7 +107,7 @@ public class Vector
         );
     }
 
-    public static Vector DequantizeRotation(Vector quantized, float range, float offset, float maxValue)
+    public static Vector DequantizeRotation(Vector quantized, double range, double offset, double maxValue)
     {
         return new Vector
         {
@@ -109,7 +119,7 @@ public class Vector
 
     public Vector ToDegrees()
     {
-        const float toDegrees = 180.0f / (float)Math.PI;
+        const double toDegrees = 180.0 / Math.PI;
         return new Vector { X = X * toDegrees, Y = Y * toDegrees, Z = Z * toDegrees };
     }
 

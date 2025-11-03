@@ -241,13 +241,15 @@ public class CodeGenerator
             Vector position = obj.Position;
             var scale = new Vector
             {
-                X = MathF.Round(obj.Right.Magnitude(), 3),
-                Y = MathF.Round(obj.Up.Magnitude(), 3),
-                Z = MathF.Round(obj.Front.Magnitude(), 3)
+                X = obj.Right.Magnitude(),
+                Y = obj.Up.Magnitude(),
+                Z = obj.Front.Magnitude()
             };
             Vector rotation = MatrixToAnglesRadians(obj.Right, obj.Up, obj.Front, scale);
 
-            validObjects.Add((obj, scale, rotation, obj.Type));
+            // Console.WriteLine($"Debug: Position x={position.X}, y={position.Y}, z={position.Z} -  Pitch={RadiansToDegrees(rotation.X)}, Yaw={RadiansToDegrees(rotation.Y)}, Roll={RadiansToDegrees(rotation.Z)}");
+
+            validObjects.Add((obj, Vector.Round(scale, 2), rotation, obj.Type));
 
             minBounds = Vector.Min(minBounds, position);
             maxBounds = Vector.Max(maxBounds, position);
@@ -312,8 +314,8 @@ public class CodeGenerator
             writer.Write((ushort)chunks.Count);
 
             // Object bounds min/max
-            minBounds.WriteTo(writer);
-            maxBounds.WriteTo(writer);
+            minBounds.WriteToAsFloat(writer);
+            maxBounds.WriteToAsFloat(writer);
 
             Console.WriteLine($"Scale Palette Count: {scalePalette.Count} Rotation Palette Count: {rotationPalette.Count} Type Palette Count: {typePalette.Count}");
             writer.Write((ushort)scalePalette.Count);
@@ -323,13 +325,13 @@ public class CodeGenerator
             // Scale palette
             foreach (var s in scalePalette)
             {
-                s.WriteTo(writer);
+                s.WriteToAsFloat(writer);
             }
 
             // Rotation palette
             foreach (var r in rotationPalette)
             {
-                r.WriteTo(writer);
+                r.WriteToAsFloat(writer);
             }
 
             // Type palette
@@ -406,7 +408,7 @@ public class CodeGenerator
                     if (customRot)
                     {
                         // Quantize custom rotation (radians to 0-65535 for -pi to pi)
-                        var (rx, ry, rz) = rotation.QuantizeRotation(RotationRange, (float)Math.PI, MaxUint16);
+                        var (rx, ry, rz) = rotation.QuantizeRotation(RotationRange, Math.PI, MaxUint16);
 
                         writer.Write(rx);
                         writer.Write(ry);
@@ -488,12 +490,14 @@ public class CodeGenerator
 
     /// <summary>
     /// Converts a rotation matrix (from right, up, front vectors) to Euler angles (Pitch, Yaw, Roll) in radians.
-    /// This uses YXZ rotation order which matches Godot's default rotation order.
-    /// The matrix is treated as ROW-major: [right.xyz, up.xyz, front.xyz]
+    /// This matches Godot's Basis.get_euler(EULER_ORDER_YXZ) implementation exactly.
+    /// The vectors are stored as columns in Godot: Basis = [right | up | front]
     /// All angles are returned in radians.
     /// </summary>
     public static Vector MatrixToAnglesRadians(Vector right, Vector up, Vector front, Vector scale)
     {
+        const double epsilon = 0.00000025;
+
         // Avoid division by zero if an object has zero scale
         if (scale.X == 0 || scale.Y == 0 || scale.Z == 0)
         {
@@ -505,36 +509,60 @@ public class CodeGenerator
         Vector normalizedUp = up / scale.Y;
         Vector normalizedFront = front / scale.Z;
 
-        // Create a normalized 3x3 rotation matrix (row-major)
-        float m11 = normalizedRight.X, m12 = normalizedRight.Y, m13 = normalizedRight.Z;
-        float m21 = normalizedUp.X, m22 = normalizedUp.Y, m23 = normalizedUp.Z;
-        float m31 = normalizedFront.X, m32 = normalizedFront.Y, m33 = normalizedFront.Z;
+        // Godot stores basis as columns, but accesses via rows[i][j]
+        // So: rows[0] = (right.x, up.x, front.x)
+        //     rows[1] = (right.y, up.y, front.y)
+        //     rows[2] = (right.z, up.z, front.z)
+        double rows_0_0 = normalizedRight.X, rows_0_1 = normalizedUp.X, rows_0_2 = normalizedFront.X;
+        double rows_1_0 = normalizedRight.Y, rows_1_1 = normalizedUp.Y, rows_1_2 = normalizedFront.Y;
+        double rows_2_0 = normalizedRight.Z, rows_2_1 = normalizedUp.Z, rows_2_2 = normalizedFront.Z;
 
-        float yaw, pitch, roll;
+        double m12 = rows_1_2;
+        double pitch, yaw, roll;
 
-        // YXZ order: Extract Pitch first (rotation around X-axis) in radians
-        pitch = (float)Math.Asin(m23);  // Changed: removed negative sign
-
-        // Check for gimbal lock
-        if (Math.Abs(m23) < 0.99999f)
+        if (m12 < (1 - epsilon))
         {
-            // Yaw (Y-axis rotation) in radians
-            yaw = (float)Math.Atan2(-m13, m33);  // Changed: negated m13
-            // Roll (Z-axis rotation) in radians
-            roll = (float)Math.Atan2(-m21, m22);  // Changed: negated m21
+            if (m12 > -(1 - epsilon))
+            {
+                // Check for pure X rotation (simplified form)
+                if (rows_1_0 == 0 && rows_0_1 == 0 && rows_0_2 == 0 &&
+                    rows_2_0 == 0 && rows_0_0 == 1)
+                {
+                    pitch = Math.Atan2(-m12, rows_1_1);
+                    yaw = 0;
+                    roll = 0;
+                }
+                else
+                {
+                    pitch = Math.Asin(-m12);
+                    yaw = Math.Atan2(rows_0_2, rows_2_2);
+                    roll = Math.Atan2(rows_1_0, rows_1_1);
+                }
+            }
+            else // m12 == -1 (gimbal lock)
+            {
+                pitch = Math.PI * 0.5;
+                yaw = Math.Atan2(rows_0_1, rows_0_0);
+                roll = 0;
+            }
         }
-        else
+        else // m12 == 1 (gimbal lock)
         {
-            // Gimbal lock case (pitch at ±90 degrees)
-            yaw = (float)Math.Atan2(m31, m11);  // Changed: removed negative
+            pitch = -Math.PI * 0.5;
+            yaw = -Math.Atan2(rows_0_1, rows_0_0);
             roll = 0;
         }
 
         return new Vector
         {
-            X = pitch,   // Pitch in radians (rotation around X-axis)
+            X = pitch * -1,   // Pitch in radians (rotation around X-axis)
             Y = yaw,     // Yaw in radians (rotation around Y-axis)
-            Z = roll     // Roll in radians (rotation around Z-axis)
+            Z = roll * -1 // Roll in radians (rotation around Z-axis) multiplied by -1 to match the portal runtime expectations
         };
+    }
+
+    public static double RadiansToDegrees(double radians)
+    {
+        return radians * (180.0 / Math.PI);
     }
 }
