@@ -1,0 +1,7 @@
+{
+    "scoreUI_team_label": "Team {}",
+    "score_timer_seperator": ":",
+    "score_timer_minutes": "{}",
+    "score_timer_seconds": "{}{}",
+    "order_team_identifier": "You are on Team {}"
+}

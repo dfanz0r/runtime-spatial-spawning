@@ -1,3 +1,6 @@
+//@ts-ignore
+import * as modlib from "modlib";
+
 // Copyright (c) 2025 Matt Sitton (dfanz0r)
 // Licensed under the BSD 2-Clause License.
 // See the LICENSE file in the project root for full license information.
@@ -281,17 +284,14 @@ const mapTypeToEnum: { [key: string]: any } = {
     Limestone: mod.RuntimeSpawn_Limestone,
     Outskirts: mod.RuntimeSpawn_Outskirts,
     Tungsten: mod.RuntimeSpawn_Tungsten,
+    Granite_TechCampus_Portal: (mod as any)["RuntimeSpawn_Granite_TechCampus_Portal"],
 };
 
 class Vector {
     constructor(public x: number = 0, public y: number = 0, public z: number = 0) {}
 
-    private cachedModVec: mod.Vector | undefined;
-
     public toModVector(): mod.Vector {
-        this.cachedModVec ??= mod.CreateVector(this.x, this.y, this.z);
-
-        return this.cachedModVec;
+        return mod.CreateVector(this.x, this.y, this.z);
     }
 
     public fromModVector(vec: mod.Vector): Vector {
@@ -303,13 +303,17 @@ class Vector {
 }
 
 const ZeroVector = new Vector(0, 0, 0);
+const ModZeroVector = mod.CreateVector(0, 0, 0);
+const ModOneVector = mod.CreateVector(1, 1, 1);
 
 interface SpatialObject {
     uid: number;
     typeId: number;
-    position: Vector;
-    scale: Vector;
-    rotation: Vector;
+    position: Vector; // Used for spatial distance calculations during object capture
+    // Pre-computed mod.Vector instances for efficient spawning (avoids repeated conversions)
+    modPosition: mod.Vector;
+    modScale: mod.Vector;
+    modRotation: mod.Vector;
 }
 
 interface ChunkInfo {
@@ -330,12 +334,19 @@ class MapObjectData {
     public readonly chunkSegments: Map<string, ObjectSpan>;
     public readonly chunkSize: number;
     public readonly objectCount: number;
+    public readonly uidToChunk: Map<number, string>;
 
-    constructor(chunkObjects: Array<SpatialObject>, chunkSegments: Map<string, ObjectSpan>, chunkSize: number) {
+    constructor(
+        chunkObjects: Array<SpatialObject>,
+        chunkSegments: Map<string, ObjectSpan>,
+        chunkSize: number,
+        uidToChunk: Map<number, string>
+    ) {
         this.chunkObjects = chunkObjects;
         this.chunkSegments = chunkSegments;
         this.chunkSize = chunkSize;
         this.objectCount = chunkObjects.length;
+        this.uidToChunk = uidToChunk;
     }
 }
 
@@ -351,6 +362,7 @@ class IncrementalDataParser {
     private typePalette: string[];
     private chunkObjects: SpatialObject[];
     private chunkMap: Map<string, ObjectSpan> = new Map();
+    private uidToChunk: Map<number, string> = new Map();
     private chunkSize: number = 0;
     private mapSpecificEnum: any = null;
 
@@ -522,13 +534,16 @@ class IncrementalDataParser {
                 }
                 const uid = this.currentObjectCount++;
 
+                // Pre-compute mod.Vector instances during parsing to avoid repeated conversions during updates
                 this.chunkObjects[uid] = {
                     uid: uid, // use the current objectCount to get a unique object id
                     typeId,
                     position: pos,
-                    scale: scale,
-                    rotation: rot,
+                    modPosition: pos.toModVector(),
+                    modScale: scale.toModVector(),
+                    modRotation: rot.toModVector(),
                 };
+                this.uidToChunk.set(uid, chunkKey);
                 currentChunkBounds.end = this.currentObjectCount;
             } catch (e) {
                 console.log("Failed to create object, skipping!");
@@ -542,7 +557,7 @@ class IncrementalDataParser {
      */
     public getResults(): MapObjectData | null {
         if (!this.isComplete) return null;
-        return new MapObjectData(this.chunkObjects, this.chunkMap, this.chunkSize);
+        return new MapObjectData(this.chunkObjects, this.chunkMap, this.chunkSize, this.uidToChunk);
     }
 
     public isParsingComplete(): boolean {
@@ -553,58 +568,96 @@ class IncrementalDataParser {
 class DynamicObjectManager {
     private readonly mapData: MapObjectData;
 
-    private readonly spawnRadiusSq: number;
-    private readonly chunkSearchRadius: number;
-
     private spawnedObjects = new Map<number, mod.SpatialObject>();
-    private trackedPoints = new Map<string, Vector>();
+    private spawnedTypes = new Map<number, number>();
+    private trackedPoints = new Map<string, { point: Vector; radius: number; team: number }>();
     private desiredObjectSet = new Set<number>();
+    private objectOwnership: Map<number, number> = new Map();
+    private uidToChunk: Map<number, string>;
 
-    constructor(mapData: MapObjectData, spawnRadius: number) {
+    private teamMaterialMap: Array<number>;
+
+    constructor(mapData: MapObjectData) {
         this.mapData = mapData;
-        this.spawnRadiusSq = spawnRadius * spawnRadius;
-        this.chunkSearchRadius = Math.ceil(spawnRadius / mapData.chunkSize);
+        this.uidToChunk = mapData.uidToChunk;
+        this.teamMaterialMap = [];
+        this.teamMaterialMap.push(mod.RuntimeSpawn_Common.BarrierStoneBlock_01_A);
+        this.teamMaterialMap.push(mod.RuntimeSpawn_Abbasid.BarrierHesco_01_128x120);
     }
 
     private getChunkKey(x: number, y: number, z: number): string {
         return `${x},${y},${z}`;
     }
 
-    public addOrUpdateTrackedPoint(key: string, position: mod.Vector): void {
+    public addOrUpdateTrackedPoint(key: string, position: mod.Vector, radius: number, team: number): void {
         // TODO - We could optimize memory further by reusing Vector instances in some kind of object pool
-        this.trackedPoints.set(key, new Vector().fromModVector(position));
+        this.trackedPoints.set(key, { point: new Vector().fromModVector(position), radius, team });
     }
 
     public removeTrackedPoint(key: string): void {
         this.trackedPoints.delete(key);
     }
 
+    public getObjectOwnership(): Map<number, number> {
+        return this.objectOwnership;
+    }
+
+    // Helper function to get team scores for the UI
+    public getTeamScores(): Map<number, number> {
+        const scores = new Map<number, number>([
+            [1, 0],
+            [2, 0],
+        ]);
+        for (const team of this.objectOwnership.values()) {
+            const teamId = team + 1; // Convert team index (0, 1) to team ID (1, 2)
+            scores.set(teamId, (scores.get(teamId) ?? 0) + 1);
+        }
+        return scores;
+    }
+
+    public calculateCurrentWinner(): number {
+        let team0Count = 0;
+        let team1Count = 0;
+        for (const team of this.objectOwnership.values()) {
+            if (team === 0) team0Count++;
+            else if (team === 1) team1Count++;
+        }
+
+        if (team0Count > team1Count) {
+            return 1; // Team 1 wins
+        } else if (team1Count > team0Count) {
+            return 2; // Team 2 wins
+        } else {
+            return 0; // Tie
+        }
+    }
+
     public update(): void {
-        this.desiredObjectSet.clear();
-
-        const chunkObjects = this.mapData.chunkObjects;
-
-        for (const position of this.trackedPoints.values()) {
-            const pointX = position.x;
-            const pointY = position.y;
-            const pointZ = position.z;
+        // Claim objects for teams
+        for (const trackedPoint of this.trackedPoints.values()) {
+            const pointX = trackedPoint.point.x;
+            const pointY = trackedPoint.point.y;
+            const pointZ = trackedPoint.point.z;
 
             const chunkX = Math.floor(pointX / this.mapData.chunkSize);
             const chunkY = Math.floor(pointY / this.mapData.chunkSize);
             const chunkZ = Math.floor(pointZ / this.mapData.chunkSize);
 
-            for (let x = chunkX - this.chunkSearchRadius; x <= chunkX + this.chunkSearchRadius; x++) {
-                for (let y = chunkY - this.chunkSearchRadius; y <= chunkY + this.chunkSearchRadius; y++) {
-                    for (let z = chunkZ - this.chunkSearchRadius; z <= chunkZ + this.chunkSearchRadius; z++) {
-                        const chunkRange = this.mapData.chunkSegments.get(this.getChunkKey(x, y, z));
+            const chunkRadius = Math.ceil(trackedPoint.radius / this.mapData.chunkSize);
+
+            for (let x = chunkX - chunkRadius; x <= chunkX + chunkRadius; x++) {
+                for (let y = chunkY - chunkRadius; y <= chunkY + chunkRadius; y++) {
+                    for (let z = chunkZ - chunkRadius; z <= chunkZ + chunkRadius; z++) {
+                        const chunkKey = this.getChunkKey(x, y, z);
+                        const chunkRange = this.mapData.chunkSegments.get(chunkKey);
                         if (chunkRange) {
                             for (let i = chunkRange.start; i < chunkRange.end; ++i) {
-                                const obj = chunkObjects[i];
+                                const obj = this.mapData.chunkObjects[i];
                                 const dx = obj.position.x - pointX;
                                 const dy = obj.position.y - pointY;
                                 const dz = obj.position.z - pointZ;
-                                if (dx * dx + dy * dy + dz * dz <= this.spawnRadiusSq) {
-                                    this.desiredObjectSet.add(obj.uid);
+                                if (dx * dx + dy * dy + dz * dz <= trackedPoint.radius * trackedPoint.radius) {
+                                    this.objectOwnership.set(obj.uid, trackedPoint.team);
                                 }
                             }
                         }
@@ -613,24 +666,44 @@ class DynamicObjectManager {
             }
         }
 
-        for (const [uid, handle] of this.spawnedObjects.entries()) {
-            if (!this.desiredObjectSet.has(uid)) {
-                mod.UnspawnObject(handle);
-                this.spawnedObjects.delete(uid);
-            }
+        // Collect desired objects: all owned objects
+        this.desiredObjectSet.clear();
+        for (const [uid, team] of this.objectOwnership) {
+            this.desiredObjectSet.add(uid);
         }
 
+        // Spawn or update objects in desired (don't despawn any, only respawn when ownership changes)
         for (const uid of this.desiredObjectSet) {
-            if (!this.spawnedObjects.has(uid)) {
-                const objToSpawn = chunkObjects[uid];
-                const pos = objToSpawn.position;
+            const objToSpawn = this.mapData.chunkObjects[uid];
+            const team = this.objectOwnership.get(uid)!;
+            const desiredTypeId = this.teamMaterialMap[team] || objToSpawn.typeId;
+
+            if (this.spawnedObjects.has(uid)) {
+                const handle = this.spawnedObjects.get(uid)!;
+                if (this.spawnedTypes.get(uid) !== desiredTypeId) {
+                    mod.UnspawnObject(handle);
+                    this.spawnedObjects.delete(uid);
+                    this.spawnedTypes.delete(uid);
+                    // Spawn new using pre-computed mod.Vector instances
+                    const newHandle = mod.SpawnObject(
+                        desiredTypeId,
+                        objToSpawn.modPosition,
+                        objToSpawn.modRotation,
+                        objToSpawn.modScale
+                    );
+                    this.spawnedObjects.set(uid, newHandle);
+                    this.spawnedTypes.set(uid, desiredTypeId);
+                }
+            } else {
+                // Spawn new using pre-computed mod.Vector instances
                 const handle = mod.SpawnObject(
-                    objToSpawn.typeId,
-                    pos.toModVector(),
-                    objToSpawn.rotation.toModVector(),
-                    objToSpawn.scale.toModVector()
+                    desiredTypeId,
+                    objToSpawn.modPosition,
+                    objToSpawn.modRotation,
+                    objToSpawn.modScale
                 );
                 this.spawnedObjects.set(uid, handle);
+                this.spawnedTypes.set(uid, desiredTypeId);
             }
         }
     }
@@ -638,6 +711,61 @@ class DynamicObjectManager {
 
 let parser: IncrementalDataParser | null = null;
 let objectManager: DynamicObjectManager | null = null;
+
+const teams: mod.HQ[] = [];
+const teamsPosition: mod.Vector[] = [];
+const teamSpawners: mod.VehicleSpawner[] = [];
+let teamDataSet = false;
+let vehicleSpawnersEnabled = false;
+
+function updateTeamData() {
+    if (teamDataSet) return;
+
+    // only enable spawners and HQ's once we have loaded all of the runtime spatial data
+    const team1Hq = mod.GetHQ(1);
+    const team2Hq = mod.GetHQ(2);
+    teams.push(team1Hq);
+    teams.push(team2Hq);
+
+    const team1HqPosition = mod.GetObjectPosition(team1Hq);
+    const team2HqPosition = mod.GetObjectPosition(team2Hq);
+    teamsPosition.push(team1HqPosition);
+    teamsPosition.push(team2HqPosition);
+
+    console.log(
+        `Team 1 HQ Position: (${mod.XComponentOf(team1HqPosition)}, ${mod.YComponentOf(team1HqPosition)}, ${mod.ZComponentOf(
+            team1HqPosition
+        )})`
+    );
+    console.log(
+        `Team 2 HQ Position: (${mod.XComponentOf(team2HqPosition)}, ${mod.YComponentOf(team2HqPosition)}, ${mod.ZComponentOf(
+            team2HqPosition
+        )})`
+    );
+
+    const team1Spawner = mod.GetVehicleSpawner(1);
+    const team2Spawner = mod.GetVehicleSpawner(2);
+    teamSpawners.push(team1Spawner);
+    teamSpawners.push(team2Spawner);
+    teamDataSet = true;
+
+    // Vehicle spawners will be enabled when first player spawns on map
+}
+
+function enableVehicleSpawners(): void {
+    if (vehicleSpawnersEnabled || teamSpawners.length < 2) return;
+
+    mod.SetVehicleSpawnerAutoSpawn(teamSpawners[0], true);
+    mod.SetVehicleSpawnerAutoSpawn(teamSpawners[1], true);
+    vehicleSpawnersEnabled = true;
+    console.log("Vehicle spawners enabled - first player deployed!");
+}
+
+// REMOVED: The old UI variables and functions are no longer needed
+// let countdownText: mod.UIWidget;
+// function getTimeLeft(): { minutes: number; seconds: number; totalSeconds: number }
+// let previousTime = 0;
+// function updateCountdownUI(): void
 
 /**
  * Main setup function that runs once when the gamemode starts.
@@ -648,8 +776,66 @@ export function OnGameModeStarted(): void {
     parser = new IncrementalDataParser();
     parser.parseDataPalette();
     console.log("Parser ready. Chunk processing will happen incrementally during updates.");
+    mod.SetGameModeTimeLimit(600); // Set time limit to 10 minutes
+
+    // INTEGRATION: Initialize the HUD Manager
+    hudManager = new HUDManager();
+
+    // REMOVED: The old manual UI creation
+    // const timeLeft = getTimeLeft();
+    // mod.AddUIText(...)
+    // countdownText = mod.FindUIWidgetWithName("countdown");
 }
 
+function FindClosestTeam(vehicle: mod.Vehicle): number {
+    let prevDistance = Number.MAX_VALUE;
+    let closestIndex = -1;
+    const vehPos = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
+
+    if (!vehPos) {
+        console.log(`[FindClosestTeam] ERROR - vehPos is NULL!`);
+        return -1;
+    }
+
+    if (teamSpawners.length === 0) {
+        console.log(`[FindClosestTeam] ERROR - teamSpawners array is empty!`);
+        return -1;
+    }
+
+    console.log(
+        `[FindClosestTeam] Vehicle Position: (${mod.XComponentOf(vehPos)}, ${mod.YComponentOf(vehPos)}, ${mod.ZComponentOf(
+            vehPos
+        )}), teamSpawners.length: ${teamSpawners.length}`
+    );
+
+    for (let i = 0; i < teamSpawners.length; i++) {
+        const spawnerPos = teamsPosition[i];
+
+        if (!spawnerPos) {
+            console.log(`[FindClosestTeam] ERROR - Spawn ${i} Position is NULL!`);
+            continue;
+        }
+
+        console.log(
+            `[FindClosestTeam] Spawn ${i} Position: (${mod.XComponentOf(spawnerPos)}, ${mod.YComponentOf(
+                spawnerPos
+            )}, ${mod.ZComponentOf(spawnerPos)})`
+        );
+        const dist = mod.DistanceBetween(spawnerPos, vehPos);
+        console.log(`[FindClosestTeam] Distance to Spawn ${i}: ${dist}`);
+
+        if (dist < prevDistance) {
+            prevDistance = dist;
+            closestIndex = i;
+        }
+    }
+
+    console.log(`[FindClosestTeam] Closest team index: ${closestIndex}, distance: ${prevDistance}`);
+    return closestIndex;
+}
+
+const VEHICLE_CAP_RADIUS = 30;
+const PLAYER_CAP_RADIUS = 15;
 /**
  * Global update loop. Continues parsing chunks incrementally until complete,
  * then manages object spawning for all subsequent updates.
@@ -665,15 +851,16 @@ export function OngoingGlobal(): void {
         if (parser.isParsingComplete()) {
             const results = parser.getResults();
             if (results) {
-                const SPAWN_RADIUS = 40;
-                objectManager = new DynamicObjectManager(results, SPAWN_RADIUS);
-                console.log(`Spatial manager ready. Tracking objects within a ${SPAWN_RADIUS}m radius.`);
+                objectManager = new DynamicObjectManager(results);
+                console.log("Spatial manager ready.");
             }
         }
         return;
     }
 
     if (objectManager) {
+        // REMOVED: updateCountdownUI();
+        updateTeamData();
         let foundPlayers = 0;
         for (let playerId = 0; playerId < players.length; ++playerId) {
             if (foundPlayers >= playerCount) break;
@@ -686,21 +873,64 @@ export function OngoingGlobal(): void {
 
             const playerPos = mod.GetSoldierState(player, mod.SoldierStateVector.GetPosition);
             const key = playerKeyMap.get(playerId);
-            if (key) {
-                objectManager.addOrUpdateTrackedPoint(key, playerPos);
+            const teamId = playerTeam[playerId];
+            if (key && teamId !== undefined) {
+                objectManager.addOrUpdateTrackedPoint(key, playerPos, PLAYER_CAP_RADIUS, teamId - 1);
             }
         }
 
         for (let [vehId, vehicle] of vehicles) {
             if (!vehicle) continue;
             const vehPos = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
+
             const key = vehKeyMap.get(vehId);
-            if (key) {
-                objectManager.addOrUpdateTrackedPoint(key, vehPos);
+            const vehicleTeam = vehicleTeamId.get(vehId);
+
+            // Detailed logging for vehicle capture debugging
+            if (!key || vehicleTeam === undefined) {
+                console.log(`[Vehicle ${vehId}] SKIPPED - key: ${key ?? "NULL"}, vehicleTeam: ${vehicleTeam ?? "UNDEFINED"}`);
+            } else if (!vehPos) {
+                console.log(`[Vehicle ${vehId}] SKIPPED - vehPos is NULL. key: ${key}, vehicleTeam: ${vehicleTeam}`);
+            } else {
+                // const posX = mod.XComponentOf(vehPos);
+                // const posY = mod.YComponentOf(vehPos);
+                // const posZ = mod.ZComponentOf(vehPos);
+                // console.log(
+                //     `[Vehicle ${vehId}] CAPTURING - key: ${key}, team: ${vehicleTeam}, pos: (${posX}, ${posY}, ${posZ}), radius: ${VEHICLE_CAP_RADIUS}`
+                // );
+                objectManager.addOrUpdateTrackedPoint(key, vehPos, VEHICLE_CAP_RADIUS, vehicleTeam);
             }
         }
 
+        if (mod.GetMatchTimeRemaining() <= 0.5) {
+            // Calculate final scores and winner
+            const winner = objectManager.calculateCurrentWinner();
+            const ownership = objectManager!.getObjectOwnership();
+            let team0Count = 0;
+            let team1Count = 0;
+            for (const team of ownership.values()) {
+                if (team === 0) team0Count++;
+                else if (team === 1) team1Count++;
+            }
+
+            console.log(`Final Scores - Team 1: ${team0Count}, Team 2: ${team1Count}. Winner: Team ${winner}`);
+
+            mod.EndGameMode(mod.GetTeam(winner));
+        }
+
         objectManager.update();
+
+        // Update global teamScores cache for UI widgets to use (reuse Map to avoid allocations)
+        const scores = objectManager.getTeamScores();
+        teamScores.clear();
+        for (const [teamId, score] of scores) {
+            teamScores.set(teamId, score);
+        }
+
+        // INTEGRATION: Refresh all player HUDs with the latest scores
+        if (hudManager) {
+            hudManager.refreshAll(teamScores);
+        }
     }
 }
 
@@ -714,11 +944,17 @@ const players = Array<mod.Player | undefined>(256);
 const playerDeployments = Array<boolean>(256);
 let playerCount = 0;
 
+const playerTeam = new Array<number | undefined>();
+
 const vehicles = new Map<number, mod.Vehicle>();
+const vehicleTeamId = new Map<number, number>();
 
 export function OnPlayerDeployed(player: mod.Player): void {
     const playerId = mod.GetObjId(player);
     playerDeployments[playerId] = true;
+
+    // Enable vehicle spawners on first player deployment
+    enableVehicleSpawners();
 }
 
 export function OnPlayerUndeploy(player: mod.Player): void {
@@ -740,7 +976,20 @@ export function OnVehicleSpawned(vehicle: mod.Vehicle): void {
     const vehId = mod.GetObjId(vehicle);
     if (!vehKeyMap.get(vehId)) vehKeyMap.set(vehId, `vehicle_${vehId}`);
     vehicles.set(vehId, vehicle);
-    console.log(`Vehicle ${vehId} Spawned! ${vehKeyMap.get(vehId)}`);
+
+    const closestTeam = FindClosestTeam(vehicle);
+    vehicleTeamId.set(vehId, closestTeam);
+
+    const vehPos = mod.GetVehicleState(vehicle, mod.VehicleStateVector.VehiclePosition);
+    const posX = vehPos ? mod.XComponentOf(vehPos) : "NULL";
+    const posY = vehPos ? mod.YComponentOf(vehPos) : "NULL";
+    const posZ = vehPos ? mod.ZComponentOf(vehPos) : "NULL";
+
+    console.log(
+        `[OnVehicleSpawned] Vehicle ${vehId} - key: ${vehKeyMap.get(
+            vehId
+        )}, team: ${closestTeam}, pos: (${posX}, ${posY}, ${posZ})`
+    );
 }
 
 export function OnPlayerJoinGame(player: mod.Player): void {
@@ -750,6 +999,10 @@ export function OnPlayerJoinGame(player: mod.Player): void {
     players[playerId] = player;
     playerDeployments[playerId] = false;
     playerCount++;
+    const team = mod.GetTeam(player);
+    const teamId = mod.GetObjId(team);
+
+    playerTeam[playerId] = teamId;
 
     console.log(`Player ${playerId} Joined!`);
 }
@@ -761,9 +1014,740 @@ export function OnPlayerLeaveGame(playerId: number): void {
             objectManager.removeTrackedPoint(key);
         }
     }
+
     playerKeyMap.delete(playerId);
     players[playerId] = undefined;
     playerDeployments[playerId] = false;
+    playerTeam[playerId] = undefined;
     playerCount--;
     console.log(`Player ${playerId} Left!`);
+}
+
+// ==============================================================================================
+// UI Classes - BASED ON https://github.com/Mystfit/BF6-CTF-Portal
+// ==============================================================================================
+
+// --- UI HELPER: TEAM COLORS ---
+// Pre-cache default vectors to avoid creating new ones on every fallback
+const DefaultGrayColor = mod.CreateVector(0.5, 0.5, 0.5);
+const DefaultWhiteColor = mod.CreateVector(1, 1, 1);
+
+const TeamColors = new Map<number, mod.Vector>([
+    [1, mod.CreateVector(0.1, 0.4, 0.8)], // Blue for Team 1
+    [2, mod.CreateVector(0.8, 0.3, 0.1)], // Orange for Team 2
+]);
+const TeamColorsLight = new Map<number, mod.Vector>([
+    [1, mod.CreateVector(0.7, 0.8, 1.0)], // Light Blue
+    [2, mod.CreateVector(1.0, 0.8, 0.7)], // Light Orange
+]);
+
+function GetTeamColorById(teamId: number): mod.Vector {
+    return TeamColors.get(teamId) ?? DefaultGrayColor;
+}
+
+function GetTeamColorLightById(teamId: number): mod.Vector {
+    return TeamColorsLight.get(teamId) ?? DefaultWhiteColor;
+}
+
+// Get light team color from team object
+function GetTeamColorLight(team: mod.Team): mod.Vector {
+    const teamId = mod.GetObjId(team);
+    return GetTeamColorLightById(teamId);
+}
+
+// Note: VectorClampToRange removed - light colors are already in valid [0,1] range
+function VectorClampToRange(vec: mod.Vector, min: number, max: number): mod.Vector {
+    const x = Math.max(min, Math.min(max, mod.XComponentOf(vec)));
+    const y = Math.max(min, Math.min(max, mod.YComponentOf(vec)));
+    const z = Math.max(min, Math.min(max, mod.ZComponentOf(vec)));
+    return mod.CreateVector(x, y, z);
+}
+
+// Get array of team IDs that are currently leading (highest score)
+function GetLeadingTeamIDs(): number[] {
+    if (!objectManager) return [];
+    const scores = objectManager.getTeamScores();
+    let maxScore = -1;
+    const leadingTeams: number[] = [];
+
+    for (const [teamId, score] of scores) {
+        if (score > maxScore) {
+            maxScore = score;
+            leadingTeams.length = 0;
+            leadingTeams.push(teamId);
+        } else if (score === maxScore) {
+            leadingTeams.push(teamId);
+        }
+    }
+
+    return leadingTeams;
+}
+
+// Cache of current team scores for UI updates - reused each frame to avoid allocations
+let teamScores: Map<number, number> = new Map([
+    [1, 0],
+    [2, 0],
+]);
+
+// --- BASE WIDGET ---
+interface TickerWidgetParams {
+    position: number[];
+    size: number[];
+    parent: mod.UIWidget;
+    textSize?: number;
+    bracketTopBottomLength?: number;
+    bracketThickness?: number;
+    bgColor?: mod.Vector;
+    textColor?: mod.Vector;
+    bgAlpha?: number;
+    showProgressBar?: boolean;
+    progressValue?: number;
+    progressDirection?: "left" | "right";
+}
+
+abstract class TickerWidget {
+    readonly parent: mod.UIWidget;
+    readonly position: number[];
+    readonly size: number[];
+    readonly textSize: number;
+    readonly bracketTopBottomLength: number;
+    readonly bracketThickness: number;
+    protected bgColor: mod.Vector;
+    protected textColor: mod.Vector;
+    protected bgAlpha: number;
+
+    // Main widgets
+    protected columnWidget!: mod.UIWidget;
+    protected columnWidgetOutline!: mod.UIWidget;
+    protected textWidget!: mod.UIWidget;
+
+    // Progress bar
+    protected progressBarContainer: mod.UIWidget | undefined;
+    protected progressValue: number;
+    protected progressDirection: "left" | "right";
+    protected showProgressBar: boolean;
+
+    // Leading indicator brackets (left side)
+    protected leftBracketSide: mod.UIWidget | undefined;
+    protected leftBracketTop: mod.UIWidget | undefined;
+    protected leftBracketBottom: mod.UIWidget | undefined;
+
+    // Leading indicator brackets (right side)
+    protected rightBracketSide: mod.UIWidget | undefined;
+    protected rightBracketTop: mod.UIWidget | undefined;
+    protected rightBracketBottom: mod.UIWidget | undefined;
+
+    // Animation
+    isPulsing = false;
+
+    constructor(params: TickerWidgetParams) {
+        this.parent = params.parent;
+        this.position = params.position ?? [0, 0];
+        this.size = params.size ?? [0, 0];
+        this.textSize = params.textSize ?? 30;
+        this.bracketTopBottomLength = params.bracketTopBottomLength ?? 8;
+        this.bracketThickness = params.bracketThickness ?? 2;
+        this.bgColor = params.bgColor ?? mod.CreateVector(0.5, 0.5, 0.5);
+        this.textColor = params.textColor ?? mod.CreateVector(1, 1, 1);
+        this.bgAlpha = params.bgAlpha ?? 0.75;
+        this.showProgressBar = params.showProgressBar ?? false;
+        this.progressValue = params.progressValue ?? 1.0;
+        this.progressDirection = params.progressDirection ?? "left";
+
+        this.createWidgets();
+    }
+
+    /**
+     * Create all UI widgets for the ticker
+     */
+    protected createWidgets(): void {
+        // Create column container with background color
+        this.columnWidget = modlib.ParseUI({
+            type: "Container",
+            parent: this.parent,
+            position: this.position,
+            size: [this.size[0], this.size[1]],
+            anchor: mod.UIAnchor.TopCenter,
+            bgFill: mod.UIBgFill.Blur,
+            bgColor: this.bgColor,
+            bgAlpha: this.bgAlpha,
+        })!;
+
+        // Create column container with outline
+        this.columnWidgetOutline = modlib.ParseUI({
+            type: "Container",
+            parent: this.parent,
+            position: this.position,
+            size: [this.size[0], this.size[1]],
+            anchor: mod.UIAnchor.TopCenter,
+            bgFill: mod.UIBgFill.OutlineThin,
+            bgColor: this.textColor,
+            bgAlpha: 0,
+        })!;
+
+        // Create text widget
+        this.createTextWidget();
+
+        // Create progress bar if enabled
+        if (this.showProgressBar) {
+            this.createProgressBar();
+        }
+
+        // Create leading indicator brackets
+        this.createBrackets();
+    }
+
+    /**
+     * Create the text widget - can be overridden by subclasses for custom styling
+     */
+    protected createTextWidget(): void {
+        this.textWidget = modlib.ParseUI({
+            type: "Text",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [this.size[0], 25],
+            anchor: mod.UIAnchor.Center,
+            textAnchor: mod.UIAnchor.Center,
+            textSize: this.textSize,
+            textLabel: "",
+            textColor: this.textColor,
+            bgAlpha: 0,
+        })!;
+    }
+
+    /**
+     * Create progress bar container
+     */
+    protected createProgressBar(): void {
+        const progressWidth = this.size[0] * this.progressValue;
+        const anchor = this.progressDirection === "left" ? mod.UIAnchor.CenterLeft : mod.UIAnchor.CenterRight;
+
+        this.progressBarContainer = modlib.ParseUI({
+            type: "Container",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [progressWidth, this.size[1]],
+            anchor: anchor,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: this.textColor,
+            bgAlpha: 0.9,
+        })!;
+    }
+
+    /**
+     * Set the progress bar value (0.0 to 1.0)
+     */
+    public setProgressValue(value: number): void {
+        this.progressValue = Math.max(0, Math.min(1, value));
+
+        if (this.progressBarContainer) {
+            const progressWidth = this.size[0] * this.progressValue;
+            mod.SetUIWidgetSize(this.progressBarContainer, mod.CreateVector(progressWidth, this.size[1], 0));
+        }
+    }
+
+    /**
+     * Set the progress bar fill direction
+     */
+    public setProgressDirection(direction: "left" | "right"): void {
+        this.progressDirection = direction;
+
+        if (this.progressBarContainer) {
+            const anchor = direction === "left" ? mod.UIAnchor.CenterLeft : mod.UIAnchor.CenterRight;
+            mod.SetUIWidgetAnchor(this.progressBarContainer, anchor);
+        }
+    }
+
+    /**
+     * Get the progress bar value
+     */
+    public getProgressValue(): number {
+        return this.progressValue;
+    }
+
+    /**
+     * Create bracket indicators for highlighting
+     * Brackets form open/close square bracket shapes on each side
+     */
+    protected createBrackets(): void {
+        // LEFT BRACKETS (opening bracket [)
+        // Left side vertical bar
+        this.leftBracketSide = modlib.ParseUI({
+            type: "Container",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [this.bracketThickness, this.size[1]],
+            anchor: mod.UIAnchor.CenterLeft,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: this.textColor,
+            bgAlpha: 1,
+        })!;
+
+        // Left top horizontal bar
+        this.leftBracketTop = modlib.ParseUI({
+            type: "Container",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [this.bracketTopBottomLength, this.bracketThickness],
+            anchor: mod.UIAnchor.TopLeft,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: this.textColor,
+            bgAlpha: 1,
+        })!;
+
+        // Left bottom horizontal bar
+        this.leftBracketBottom = modlib.ParseUI({
+            type: "Container",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [this.bracketTopBottomLength, this.bracketThickness],
+            anchor: mod.UIAnchor.BottomLeft,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: this.textColor,
+            bgAlpha: 1,
+        })!;
+
+        // RIGHT BRACKETS (closing bracket ])
+        // Right side vertical bar
+        this.rightBracketSide = modlib.ParseUI({
+            type: "Container",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [this.bracketThickness, this.size[1]],
+            anchor: mod.UIAnchor.CenterRight,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: this.textColor,
+            bgAlpha: 1,
+        })!;
+
+        // Right top horizontal bar
+        this.rightBracketTop = modlib.ParseUI({
+            type: "Container",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [this.bracketTopBottomLength, this.bracketThickness],
+            anchor: mod.UIAnchor.TopRight,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: this.textColor,
+            bgAlpha: 1,
+        })!;
+
+        // Right bottom horizontal bar
+        this.rightBracketBottom = modlib.ParseUI({
+            type: "Container",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [this.bracketTopBottomLength, this.bracketThickness],
+            anchor: mod.UIAnchor.BottomRight,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: this.textColor,
+            bgAlpha: 1,
+        })!;
+
+        // Hide brackets by default
+        this.showBrackets(false);
+    }
+
+    /**
+     * Update the text displayed in the widget
+     */
+    protected updateText(message: mod.Message): void {
+        mod.SetUITextLabel(this.textWidget, message);
+    }
+
+    /**
+     * Show or hide the bracket indicators
+     */
+    protected showBrackets(show: boolean): void {
+        if (this.leftBracketTop) mod.SetUIWidgetVisible(this.leftBracketTop, show);
+        if (this.leftBracketSide) mod.SetUIWidgetVisible(this.leftBracketSide, show);
+        if (this.leftBracketBottom) mod.SetUIWidgetVisible(this.leftBracketBottom, show);
+        if (this.rightBracketSide) mod.SetUIWidgetVisible(this.rightBracketSide, show);
+        if (this.rightBracketTop) mod.SetUIWidgetVisible(this.rightBracketTop, show);
+        if (this.rightBracketBottom) mod.SetUIWidgetVisible(this.rightBracketBottom, show);
+    }
+
+    /**
+     * Refresh the widget - should be implemented by subclasses
+     */
+    abstract refresh(): void;
+}
+
+// --- SCORE TICKER ---
+interface ScoreTickerParams extends TickerWidgetParams {
+    teamId: number;
+}
+
+class ScoreTicker extends TickerWidget {
+    readonly teamId: number;
+
+    private currentScore: number = -1;
+    private isLeading: boolean = false;
+
+    constructor(params: ScoreTickerParams) {
+        // Get team colors before calling super
+        const teamId = params.teamId;
+        const teamColor = GetTeamColorById(teamId);
+        const textColor = GetTeamColorLightById(teamId); // Light colors already in [0,1] range
+
+        // Call parent constructor with team-specific colors
+        super({
+            position: params.position,
+            size: params.size,
+            parent: params.parent,
+            textSize: params.textSize,
+            bracketTopBottomLength: params.bracketTopBottomLength,
+            bracketThickness: params.bracketThickness,
+            bgColor: teamColor,
+            textColor: textColor,
+            bgAlpha: 0.75,
+        });
+
+        this.teamId = teamId;
+
+        this.refresh();
+    }
+
+    /**
+     * Update the score display and leading indicator
+     */
+    public updateScore(): void {
+        const score = teamScores.get(this.teamId) ?? 0;
+
+        // Only update if score has changed
+        if (this.currentScore !== score) {
+            this.currentScore = score;
+            this.updateText(mod.Message(score));
+
+            // Show brackets only if this team is the sole leader (no ties)
+            let leadingTeams = GetLeadingTeamIDs();
+            // console.log(`Leading teams: ${leadingTeams.join(", ")}`);
+            if (leadingTeams.length === 1 && leadingTeams.includes(this.teamId)) {
+                this.setLeading(true);
+            } else {
+                this.setLeading(true);
+            }
+        }
+    }
+
+    /**
+     * Set whether this team is currently in the lead
+     * @param isLeading True if this team is leading (not tied)
+     */
+    public setLeading(isLeading: boolean): void {
+        // console.log(`Score ticker leading: ${isLeading}`);
+
+        this.isLeading = isLeading;
+        this.showBrackets(isLeading);
+    }
+
+    /**
+     * Get the current score
+     */
+    public getScore(): number {
+        return this.currentScore;
+    }
+
+    /**
+     * Get the team ID
+     */
+    public getTeamId(): number {
+        return this.teamId;
+    }
+
+    /**
+     * Refresh both score and leading status
+     */
+    public refresh(): void {
+        this.updateScore();
+    }
+
+    /**
+     * Clean up UI widgets
+     */
+    public destroy(): void {
+        mod.DeleteUIWidget(this.columnWidget);
+        mod.DeleteUIWidget(this.columnWidgetOutline);
+    }
+}
+
+interface RoundTimerParams {
+    position: number[];
+    size: number[];
+    parent: mod.UIWidget;
+    textSize?: number;
+    seperatorPadding?: number;
+    bracketTopBottomLength?: number;
+    bracketThickness?: number;
+    bgColor?: mod.Vector;
+    textColor?: mod.Vector;
+    bgAlpha?: number;
+}
+
+class RoundTimer extends TickerWidget {
+    private currentTimeSeconds: number = -1;
+    private currentTimeMinutes: number = -1;
+    private seperatorPadding: number;
+    private secondsText: mod.UIWidget;
+    private minutesText: mod.UIWidget;
+    private seperatorText: mod.UIWidget;
+
+    constructor(params: RoundTimerParams) {
+        // Call parent constructor with default neutral colors if not specified
+        super({
+            position: params.position,
+            size: params.size,
+            parent: params.parent,
+            textSize: params.textSize,
+            bracketTopBottomLength: params.bracketTopBottomLength,
+            bracketThickness: params.bracketThickness,
+            bgColor: params.bgColor ?? mod.CreateVector(0.2, 0.2, 0.2),
+            textColor: params.textColor ?? mod.CreateVector(1, 1, 1),
+            bgAlpha: params.bgAlpha ?? 0.75,
+        });
+
+        this.seperatorPadding = params.seperatorPadding ?? 16;
+
+        this.secondsText = modlib.ParseUI({
+            type: "Text",
+            parent: this.columnWidget,
+            position: [this.seperatorPadding, 0],
+            size: [30, 24],
+            anchor: mod.UIAnchor.Center,
+            textAnchor: mod.UIAnchor.CenterLeft,
+            textSize: this.textSize,
+            textLabel: "",
+            textColor: this.textColor,
+            bgAlpha: 0,
+        })!;
+
+        this.minutesText = modlib.ParseUI({
+            type: "Text",
+            parent: this.columnWidget,
+            position: [-this.seperatorPadding, 0],
+            size: [5, 24],
+            anchor: mod.UIAnchor.Center,
+            textAnchor: mod.UIAnchor.CenterRight,
+            textSize: this.textSize,
+            textLabel: "",
+            textColor: this.textColor,
+            bgAlpha: 0,
+        })!;
+
+        this.seperatorText = modlib.ParseUI({
+            type: "Text",
+            parent: this.columnWidget,
+            position: [0, 0],
+            size: [30, 24],
+            anchor: mod.UIAnchor.Center,
+            textAnchor: mod.UIAnchor.Center,
+            textSize: this.textSize,
+            textLabel: mod.stringkeys.score_timer_seperator,
+            textColor: this.textColor,
+            bgAlpha: 0,
+        })!;
+
+        this.refresh();
+    }
+
+    /**
+     * Update the timer display with remaining game time
+     */
+    public updateTime(): void {
+        const remainingTime = mod.GetMatchTimeRemaining();
+        const timeSeconds = Math.floor(remainingTime);
+
+        // Only update if time has changed
+        if (this.currentTimeSeconds !== timeSeconds) {
+            // Update time values and floor/pad values
+            this.currentTimeSeconds = timeSeconds % 60;
+            this.currentTimeMinutes = Math.floor(timeSeconds / 60);
+            const secondsTensDigit = Math.floor(this.currentTimeSeconds / 10);
+            const secondsOnesDigit = this.currentTimeSeconds % 10;
+
+            // Update text labels
+            mod.SetUITextLabel(this.minutesText, mod.Message(mod.stringkeys.score_timer_minutes, this.currentTimeMinutes));
+            mod.SetUITextLabel(
+                this.secondsText,
+                mod.Message(mod.stringkeys.score_timer_seconds, secondsTensDigit, secondsOnesDigit)
+            );
+        }
+    }
+
+    /**
+     * Refresh - called by the HUD update loop to refresh timer display
+     */
+    public refresh(): void {
+        this.updateTime();
+    }
+
+    /**
+     * Clean up UI widgets
+     */
+    public destroy(): void {
+        mod.DeleteUIWidget(this.columnWidget);
+        mod.DeleteUIWidget(this.columnWidgetOutline);
+    }
+}
+
+// --- SCORE PROGRESS BAR ---
+class ScoreProgressBar {
+    private rootContainer: mod.UIWidget;
+    private team1Bar: mod.UIWidget;
+    private team2Bar: mod.UIWidget;
+    private barWidth: number;
+
+    constructor(params: any) {
+        this.barWidth = params.size[0];
+        this.rootContainer = modlib.ParseUI({
+            type: "Container",
+            parent: params.parent,
+            position: params.position,
+            size: [this.barWidth, params.size[1]],
+            anchor: mod.UIAnchor.TopCenter,
+            bgFill: mod.UIBgFill.Blur,
+            bgColor: [0, 0, 0],
+            bgAlpha: 0,
+        })!;
+
+        mod.SetUIWidgetBgAlpha(this.rootContainer, 0);
+
+        const barHeight = params.size[1];
+        const team1Color = GetTeamColorById(1);
+        const team2Color = GetTeamColorById(2);
+
+        this.team1Bar = modlib.ParseUI({
+            type: "Container",
+            parent: this.rootContainer,
+            position: [0, 0],
+            size: [this.barWidth / 2, barHeight],
+            anchor: mod.UIAnchor.CenterLeft,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: team1Color,
+            bgAlpha: 0.9,
+        })!;
+
+        mod.SetUIWidgetBgFill(this.team1Bar, mod.UIBgFill.Solid);
+        mod.SetUIWidgetBgColor(this.team1Bar, team1Color);
+        mod.SetUIWidgetBgAlpha(this.team1Bar, 0.9);
+
+        this.team2Bar = modlib.ParseUI({
+            type: "Container",
+            parent: this.rootContainer,
+            position: [0, 0],
+            size: [this.barWidth / 2, barHeight],
+            anchor: mod.UIAnchor.CenterRight,
+            bgFill: mod.UIBgFill.Solid,
+            bgColor: team2Color,
+            bgAlpha: 0.9,
+        })!;
+
+        mod.SetUIWidgetBgFill(this.team2Bar, mod.UIBgFill.Solid);
+        mod.SetUIWidgetBgColor(this.team2Bar, team2Color);
+        mod.SetUIWidgetBgAlpha(this.team2Bar, 0.9);
+    }
+
+    public refresh(scores: Map<number, number>): void {
+        const score1 = scores.get(1) ?? 0;
+        const score2 = scores.get(2) ?? 0;
+        const totalScore = score1 + score2;
+        const progress = totalScore === 0 ? 0.5 : score1 / totalScore;
+
+        mod.SetUIWidgetSize(
+            this.team1Bar,
+            mod.CreateVector(this.barWidth * progress, mod.YComponentOf(mod.GetUIWidgetSize(this.team1Bar)), 0)
+        );
+        mod.SetUIWidgetSize(
+            this.team2Bar,
+            mod.CreateVector(this.barWidth * (1.0 - progress), mod.YComponentOf(mod.GetUIWidgetSize(this.team2Bar)), 0)
+        );
+    }
+    public destroy(): void {
+        mod.DeleteUIWidget(this.rootContainer);
+    }
+}
+
+// --- GLOBAL SCORE HUD ---
+class ConquestScoreHUD {
+    private rootWidget: mod.UIWidget;
+    private teamScoreTickers: Map<number, ScoreTicker> = new Map();
+    private timerTicker: RoundTimer;
+    private scoreBar: ScoreProgressBar;
+
+    constructor() {
+        // Create global UI widget (not tied to any specific player)
+        this.rootWidget = modlib.ParseUI({
+            type: "Container",
+            size: [700, 100],
+            position: [0, 20, 0],
+            anchor: mod.UIAnchor.TopCenter,
+            bgFill: mod.UIBgFill.Blur,
+            bgColor: [0, 0, 0],
+            bgAlpha: 0.0,
+        })!;
+
+        const teamScoreSpacing = 490;
+        const teamScorePaddingTop = 68;
+        const teamWidgetSize = [76, 30];
+
+        this.teamScoreTickers.set(
+            1,
+            new ScoreTicker({
+                parent: this.rootWidget,
+                position: [-teamScoreSpacing * 0.5, teamScorePaddingTop],
+                size: teamWidgetSize,
+                teamId: 1,
+                textSize: 24,
+            })
+        );
+        this.teamScoreTickers.set(
+            2,
+            new ScoreTicker({
+                parent: this.rootWidget,
+                position: [teamScoreSpacing * 0.5, teamScorePaddingTop],
+                size: teamWidgetSize,
+                teamId: 2,
+                textSize: 24,
+            })
+        );
+
+        const barWidth = teamScoreSpacing - teamWidgetSize[0] - 20;
+        const barPosY = teamScorePaddingTop + teamWidgetSize[1] / 2 - 6; // Center vertically
+        this.scoreBar = new ScoreProgressBar({ position: [0, barPosY], size: [barWidth, 12], parent: this.rootWidget });
+
+        this.timerTicker = new RoundTimer({ position: [0, 48], parent: this.rootWidget, textSize: 26, size: [100, 22] });
+    }
+
+    public refresh(scores: Map<number, number>): void {
+        this.teamScoreTickers.get(1)?.refresh();
+        this.teamScoreTickers.get(2)?.refresh();
+        this.timerTicker.refresh();
+        this.scoreBar.refresh(scores);
+    }
+
+    public destroy(): void {
+        this.teamScoreTickers.forEach((t) => t.destroy());
+        this.timerTicker.destroy();
+        this.scoreBar.destroy();
+        mod.DeleteUIWidget(this.rootWidget);
+    }
+}
+
+// --- HUD MANAGER ---
+let hudManager: HUDManager | null = null;
+
+class HUDManager {
+    private globalHud: ConquestScoreHUD;
+
+    constructor() {
+        this.globalHud = new ConquestScoreHUD();
+    }
+
+    public refreshAll(scores: Map<number, number>): void {
+        this.globalHud.refresh(scores);
+    }
+
+    public destroy(): void {
+        this.globalHud.destroy();
+    }
 }

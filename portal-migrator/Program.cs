@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2025 Matt Sitton (dfanz0r)
+// Copyright (c) 2025 Matt Sitton (dfanz0r)
 // Licensed under the BSD 2-Clause License.
 // See the LICENSE file in the project root for full license information.
 using System;
@@ -149,7 +149,7 @@ public class CodeGenerator
             var hasIdProp = objElement.TryGetProperty("id", out var idProp);
             string? id = hasIdProp ? idProp.GetString() : null;
 
-            if (id != null && skipIds.Contains(id))
+            if (id != null && (skipIds.Contains(id) || id.StartsWith("[STATIC]")))
                 continue;
 
             if (!string.IsNullOrEmpty(id))
