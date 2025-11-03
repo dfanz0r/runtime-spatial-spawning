@@ -11,18 +11,17 @@ class_name TerrainGenerator
 @export var tile_scene: PackedScene
 @export var tile_scale: Vector3 = Vector3.ONE
 @export var slope_strength: float = 1.0
+@export var inset_offset: float = 0.0 ## Inset value. Positive values move tiles closer, negative values create gaps.
 @export_tool_button("Regenerate") var regenerateAction = regenerate_terrain
 
 var noise: FastNoiseLite = FastNoiseLite.new()
-var tile_spacing_x: float = 1.0
-var tile_spacing_z: float = 1.0
 
 func _ready() -> void:
 	if Engine.is_editor_hint():
 		noise.noise_type = FastNoiseLite.TYPE_PERLIN
 		noise.frequency = noise_scale
 
-# Helper: true if any dimension <= 0# Helper: true if any dimension <= 0
+# Helper: true if any dimension <= 0
 func _aabb_is_empty(aabb: AABB) -> bool:
 	return aabb.size.x <= 0.0 or aabb.size.y <= 0.0 or aabb.size.z <= 0.0
 
@@ -82,20 +81,20 @@ func regenerate_terrain() -> void:
 	noise.seed = randi()
 	noise.frequency = noise_scale
 
-	# compute spacing
+	# Compute the spacing for noise sampling based on the tile's actual scaled size.
 	var aabb: AABB = _get_tile_aabb(tile_scene)
-	var min_x: float = aabb.position.x * tile_scale.x
-	var max_x: float = (aabb.position.x + aabb.size.x) * tile_scale.x
-	var min_z: float = aabb.position.z * tile_scale.z
-	var max_z: float = (aabb.position.z + aabb.size.z) * tile_scale.z
+	var sampling_spacing_x: float = aabb.size.x * tile_scale.x
+	var sampling_spacing_z: float = aabb.size.z * tile_scale.z
 
-	tile_spacing_x = max_x - min_x
-	tile_spacing_z = max_z - min_z
-	# The offset to center the whole terrain grid
+	# Compute the spacing for tile placement, including the inset offset.
+	var placement_spacing_x: float = sampling_spacing_x - inset_offset
+	var placement_spacing_z: float = sampling_spacing_z - inset_offset
+	
+	# The offset to center the whole terrain grid, based on the placement grid.
 	var grid_offset: Vector3 = Vector3(
-		float(terrain_size - 1) * tile_spacing_x / 2.0,
+		float(terrain_size - 1) * placement_spacing_x / 2.0,
 		0.0,
-		float(terrain_size - 1) * tile_spacing_z / 2.0
+		float(terrain_size - 1) * placement_spacing_z / 2.0
 	)
 
 	var root = get_tree().edited_scene_root
@@ -108,11 +107,11 @@ func regenerate_terrain() -> void:
 			var h_01 = noise.get_noise_2d(xi * noise_scale, (zi + 1) * noise_scale) * height_scale
 			var h_11 = noise.get_noise_2d((xi + 1) * noise_scale, (zi + 1) * noise_scale) * height_scale
 			
-			# 2. Define the 3D world positions of the four corners
-			var p_00 = Vector3(xi * tile_spacing_x, h_00, zi * tile_spacing_z)
-			var p_10 = Vector3((xi + 1) * tile_spacing_x, h_10, zi * tile_spacing_z)
-			var p_01 = Vector3(xi * tile_spacing_x, h_01, (zi + 1) * tile_spacing_z)
-			var p_11 = Vector3((xi + 1) * tile_spacing_x, h_11, (zi + 1) * tile_spacing_z)
+			# 2. Define the 3D world positions using SAMPLING spacing to calculate correct normals
+			var p_00 = Vector3(xi * sampling_spacing_x, h_00, zi * sampling_spacing_z)
+			var p_10 = Vector3((xi + 1) * sampling_spacing_x, h_10, zi * sampling_spacing_z)
+			var p_01 = Vector3(xi * sampling_spacing_x, h_01, (zi + 1) * sampling_spacing_z)
+			var p_11 = Vector3((xi + 1) * sampling_spacing_x, h_11, (zi + 1) * sampling_spacing_z)
 
 			# 3. Calculate and average the normals of the two triangles that form the quad
 			var normal1 = (p_10 - p_00).cross(p_11 - p_00)
@@ -122,20 +121,21 @@ func regenerate_terrain() -> void:
 			# 4. Blend between flat (Vector3.UP) and the slope normal based on slope_strength
 			var up_vector = Vector3.UP.lerp(avg_normal, slope_strength).normalized()
 			
-			# --- START: Grid-Aligned Rotation Logic ---
+			# --- START: Zero Y-Rotation Logic ---
 
-			# 5. Manually construct the rotation basis to prevent Y-axis rotation.
+			# 5. Manually construct the rotation basis to eliminate Y-axis rotation.
 			# The new Y-axis is the 'up_vector' we calculated.
 			var basis_y = up_vector
 			
-			# The new X-axis is perpendicular to the world's Z-axis and our new Y-axis.
-			# This keeps the tile from twisting.
-			var basis_x = Vector3.FORWARD.cross(basis_y).normalized()
+			# The new Z-axis is derived to be perpendicular to the world's X-axis
+			# and our new Y-axis. This keeps the tile grid-aligned.
+			var basis_z = Vector3.RIGHT.cross(basis_y).normalized()
 			
-			# The new Z-axis is perpendicular to our new X and Y axes.
-			var basis_z = basis_x.cross(basis_y).normalized()
+			# The new X-axis is derived to be perpendicular to the new Y and Z axes,
+			# completing the orthonormal basis.
+			var basis_x = basis_y.cross(basis_z).normalized()
 
-			# --- END: Grid-Aligned Rotation Logic ---
+			# --- END: Zero Y-Rotation Logic ---
 			
 			# Instantiate and configure tile
 			var tile: Node3D = tile_scene.instantiate()
@@ -143,10 +143,10 @@ func regenerate_terrain() -> void:
 			if root:
 				tile.owner = root
 			
-			# Position the tile at the center of the quad, with the average height
-			var center_x = (p_00.x + p_10.x) / 2.0
-			var center_y = (h_00 + h_10 + h_01 + h_11) / 4.0 # Average height
-			var center_z = (p_00.z + p_01.z) / 2.0
+			# Position the tile at the center of the quad using PLACEMENT spacing
+			var center_x = (xi * placement_spacing_x + (xi + 1) * placement_spacing_x) / 2.0
+			var center_y = (h_00 + h_10 + h_01 + h_11) / 4.0 # Average height from sampling grid
+			var center_z = (zi * placement_spacing_z + (zi + 1) * placement_spacing_z) / 2.0
 			
 			# Apply position, rotation, and scale via a single Transform3D
 			tile.transform = Transform3D(
