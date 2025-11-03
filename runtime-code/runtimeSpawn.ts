@@ -40,25 +40,27 @@ function decodeCustomBase16(data: string, outData: Uint8Array): number {
 // It decodes the custom base16 encoding used to store binary data in strings.
 // Memory usage is minimized by reusing a fixed size buffer for chunk decoding.
 // since the current limitation overall is runtime memory usage
-class RuntimeStringsReader {
+class SpatialSteamReader {
     private readonly strings: { [key: string]: string };
     private chunkIndex = 0;
     private initialized = false;
     private chunkData: Uint8Array = new Uint8Array(DECODE_CHUNK_SIZE);
     private currentChunkLength: number = 0;
     private chunkOffset = 0;
+    private streamPrefix: string;
     public eof = false;
 
-    constructor() {
+    constructor(steamPrefix: string = "A") {
         this.strings = (mod as any).strings;
         if (typeof this.strings !== "object" || this.strings === null)
             throw new Error("Runtime object 'mod.strings' is not available.");
+        this.streamPrefix = steamPrefix;
     }
 
     private updateDataChunk(): boolean {
         if (this.eof) return false;
 
-        const key = `A${this.chunkIndex.toString(16).toUpperCase()}`;
+        const key = `${this.streamPrefix}${this.chunkIndex.toString(16).toUpperCase()}`;
         const chunkStr = this.strings[key];
 
         if (chunkStr === undefined) {
@@ -109,13 +111,13 @@ class AsyncBinaryReader {
     private bufOffset: number = 0;
     private bufLength: number = 0;
     public totalOffset: number = 0;
-    private stringReader: RuntimeStringsReader;
+    private stringReader: SpatialSteamReader;
     private _isStringReaderEof: boolean = false;
 
     private static readonly BUFFER_SIZE = 100;
     private tempStringBuffer: Uint8Array = new Uint8Array(0);
 
-    constructor(reader: RuntimeStringsReader) {
+    constructor(reader: SpatialSteamReader) {
         this.stringReader = reader;
         this.buffer = new Uint8Array(AsyncBinaryReader.BUFFER_SIZE);
         this.view = new DataView(this.buffer.buffer);
@@ -368,7 +370,7 @@ class IncrementalDataParser {
     private readonly RotationOffset = Math.PI;
 
     constructor() {
-        this.reader = new AsyncBinaryReader(new RuntimeStringsReader());
+        this.reader = new AsyncBinaryReader(new SpatialSteamReader());
 
         console.log("Parsing stream header and palettes...");
 
@@ -503,7 +505,6 @@ class IncrementalDataParser {
                 rot = new Vector(rx, ry, rz);
             } else {
                 rot = this.rotationPalette[rotIdx];
-                console.log(`${pos.x} ${pos.y} ${pos.z} - ${rot.x} ${rot.y} ${rot.z}`);
             }
 
             try {
