@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Matt Sitton (dfanz0r)
+﻿// Copyright (c) 2025 Matt Sitton (dfanz0r)
 // Licensed under the BSD 2-Clause License.
 // See the LICENSE file in the project root for full license information.
 using System;
@@ -21,36 +21,12 @@ public record SpatialObject(
     [property: JsonPropertyName("id")] string Id
 );
 
-public class RootObject
-{
-    [JsonPropertyName("Portal_Dynamic")]
-    public List<SpatialObject>? PortalDynamic { get; set; }
-
-    [JsonPropertyName("Static")]
-    public List<SpatialObject>? Static { get; set; }
-}
-
 public class CodeGenerator
 {
     private const float ChunkSize = 64.0f;
     private const float MaxUint16 = 65535.0f;
     private const float ScaleMax = 100.0f;
     private const float RotationRange = (float)Math.PI * 2;
-
-    private static Type GetEnumType(string mapType) => mapType switch
-    {
-        "Abbasid" => typeof(RuntimeSpawn_Abbasid),
-        "Aftermath" => typeof(RuntimeSpawn_Aftermath),
-        "Badlands" => typeof(RuntimeSpawn_Badlands),
-        "Battery" => typeof(RuntimeSpawn_Battery),
-        "Capstone" => typeof(RuntimeSpawn_Capstone),
-        "Dumbo" => typeof(RuntimeSpawn_Dumbo),
-        "FireStorm" => typeof(RuntimeSpawn_FireStorm),
-        "Limestone" => typeof(RuntimeSpawn_Limestone),
-        "Outskirts" => typeof(RuntimeSpawn_Outskirts),
-        "Tungsten" => typeof(RuntimeSpawn_Tungsten),
-        _ => typeof(RuntimeSpawn_Common),
-    };
 
     public static void Main(string[] args)
     {
