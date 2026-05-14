@@ -1,13 +1,8 @@
 # Runtime Spatial Spawning
 
-This codebase implements runtime spawning of spatial objects authored offline in godot
+This codebase implements runtime spawning of spatial objects authored offline in Godot.
 
-The current implementation uses blocks to dynamically show around players a psudo terrain like surface
-
-# What it does
-
-This will take a spatial json file and split out most objects from it into a custom binary format that is stored inside strings.json
-this allows us to design data which can then be dynamically spawned at runtime through various means.
+The current implementation converts a spatial JSON file into a custom binary format stored in `.strings.json`, which can be dynamically spawned at runtime through the Portal runtime code.
 
 The current code is doing a runtime spawned terrain just as a proof of concept. There are MANY issues with the current portal runtime causing bugs that make this tricky including:
 
@@ -19,31 +14,92 @@ Building this code has had to walk a fine line between all of these constraints 
 
 # Usage
 
-In order to use this tool ensure you have the latest .net sdk installed, then you can use the following command to compile spatial data for use in strings.json
-`dotnet run -c Release ..\MP_Capstone.spatial.json`
+In order to use this tool ensure you have the latest .NET SDK installed, then you can use the following command:
 
+```
+dotnet run -c Release --project portal-migrator <input.spatial.json> [output.bin] [--verbose] [--safe-base32] [--base64]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<input.spatial.json>` | Path to the source spatial JSON file (required) |
+| `[output.bin]` | Output path for the raw binary file. Default: `output.bin` |
+| `--verbose` | Also write the raw binary file (without this flag, only `.strings.json` and `_filtered.spatial.json` are written) |
+| `--safe-base32` | Portal word-filter-safe output mode: write `.strings.json` using a no-letter custom base32 alphabet. Current `runtimeSpawn.ts` expects this mode by default. |
+| `--base64` | Test output mode: write `.strings.json` using base64. Not recommended for Portal because the website word filter can corrupt base64 text. |
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Usage error (missing args) |
+| 2 | Input file not found |
+| 3 | Invalid operation (e.g., missing required JSON sections, no objects) |
+| 4 | I/O error during write |
+| 5 | Invalid JSON |
+| 6 | Unexpected error |
+
+### Example
+
+```
+dotnet run -c Release --project portal-migrator ..\MP_Capstone.spatial.json output.bin --verbose
+```
+
+Output:
 ```
 Loading JSON
-Total objects found: 4780
+Warning: 4507 unique rotation(s) exceeded byte palette limit and will be stored inline.
 Map Type: Capstone
-Found 11 referenced objects from incompressible objects.
-Found 4762 objects to compress.
-Encoded Object Count: 4762 Chunk Count: 125
-Scale Palette Count: 2 Rotation Palette Count: 4762 Type Palette Count: 2
+Total objects found: 4780
 Objects included in binary: 4762
-Encoded JSON written to ..\MP_Capstone.strings.json
-Filtered JSON written to ..\MP_Capstone_filtered.spatial.json
+Encoded Object Count: 4762 Chunk Count: 237
+Scale Palette Count: 2 Rotation Palette Count: 255 Type Palette Count: 2
+Binary file written to output.bin
+Encoded JSON written to output.strings.json
+Filtered JSON written to output_filtered.spatial.json
 ```
 
-This will produce 2 new files:
+### Output files
 
-- MP_Capstone.strings.json - this contains all spatial data that does not have special configuration inside the original source file
-- MP_Capstone_filtered.spatial.json - this has all of the objects that were checked and required to stay inside the spatial json file
+| File | Description |
+|------|-------------|
+| `output.strings.json` | Binary spatial data encoded in custom base16 by default, split into 200-character chunks (`A0`, `A1`, ...). Use `--safe-base32` for Portal upload with the current minimal `runtimeSpawn.ts`; this avoids letters to reduce word-filter corruption. |
+| `output_filtered.spatial.json` | Retained objects (incompressible — those with extra data, linked references, or explicitly skipped). These are authored manually in the spatial JSON and not handled by the binary system. |
+
+### Object classification
+
+Objects are classified during conversion:
+
+- **Compressible** → stored in the binary format. Objects without extra data (beyond `name`, `type`, `position`, `right`, `up`, `front`, `id`) and not referenced by any incompressible object.
+- **Retained** → stay in the filtered spatial JSON. Objects with extra data, linked references, `[STATIC]` prefix ids, or terrain/assets skip ids.
+
+If more than 254 unique scales or rotations exist, the excess use inline storage (palette sentinel 255) in the binary format.
 
 # runtime-code
 
-The code required to test this is located in the `runtime-code` folder. You just need to upload the file to the portal website as-is and then you can use whatever spatial data you want in the strings file that was compiled through this tool.
+The Portal runtime scripts are located in the `runtime-code` folder.
+
+- `runtimeSpawn.ts` is the minimal static spawner. Upload this script with the generated `.strings.json` file to parse the RuntimeMigrator binary stream and spawn every encoded object once.
+- `terrainExperience.ts` is the older/full proof-of-concept experience script with game mode logic and dynamic terrain ownership behavior.
+
+# Binary format
+
+See [BinaryFormat.md](./BinaryFormat.md) for the full binary layout specification.
+
+# Project structure
+
+| File | Purpose |
+|------|---------|
+| `Program.cs` | CLI entry point, parses args, delegates to `SpatialMigrator` |
+| `SpatialMigrator.cs` | Orchestrates JSON-to-binary conversion workflow |
+| `SpatialObjectClassifier.cs` | Classifies compressible vs retained objects, builds palettes |
+| `SpatialBinaryWriter.cs` | Writes the custom binary format to a byte array |
+| `StringsJsonWriter.cs` | Encodes binary data as custom-base16 chunked JSON |
+| `FilteredSpatialJsonWriter.cs` | Writes retained spatial JSON for non-compressible objects |
+| `Vector.cs` | 3D vector math, quantization/dequantization |
+| `Utilities.cs` | Custom base16 encoding/decoding |
 
 # godot
 
-If you want to mess around with the terrain generator script copy the levels/scripts folders into your portal sdk GodotProject folder
+If you want to mess around with the terrain generator script copy the levels/scripts folders into your portal SDK GodotProject folder
