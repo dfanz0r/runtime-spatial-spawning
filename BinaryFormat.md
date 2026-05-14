@@ -287,13 +287,9 @@ Format limits and current constants:
 
 ## `.strings.json` wrapper
 
-After the binary payload is written, `StringsJsonWriter` encodes it and writes a JSON object.
+After the binary payload is written, `StringsJsonWriter` encodes it with custom base16 and writes a JSON object. The minimal `runtime-code/runtimeSpawn.ts` script expects this custom base16 encoding.
 
-The default tool encoding is custom base16. For Portal website upload, prefer `--safe-base32`; it uses no letters, whitespace, quotes, slashes, backslashes, or `#` to reduce word-filter corruption. The current minimal `runtime-code/runtimeSpawn.ts` script expects safe-base32 by default.
-
-A test-only CLI mode, `--base64`, writes the same binary payload as base64 chunks instead. Base64 is JSON-safe, but it is not recommended for Portal upload because the Portal website word filter can corrupt alphabetic data.
-
-### Default custom base16 encoding
+### Custom base16 encoding
 
 Alphabet:
 
@@ -312,19 +308,3 @@ A0, A1, A2, ..., A9, AA, AB, ...
 ```
 
 The final chunk may be shorter than 200 characters. Runtime readers concatenate chunks in key index order and decode back to the binary payload before parsing the format above.
-
-### Portal-safe custom base32 encoding
-
-When the C# tool is run with `--safe-base32`, the binary payload is encoded with this 32-character alphabet:
-
-```text
-Index:  0 1 2 3 4 5 6 7 8 9 A B C D E F G H I J K L M N O P Q R S T U V
-Char:   0 1 2 3 4 5 6 7 8 9 ! $ % & ( ) * + , - . : ; = ? @ [ ] ^ _ { }
-String: "0123456789!$%&()*+,-.:;=?@[]^_{}"
-```
-
-This encoding packs 5 bits per character without padding. A full 200-character chunk decodes to 125 binary bytes. The final chunk may be shorter; decoders use `floor(characterCount * 5 / 8)` output bytes and ignore trailing zero padding bits.
-
-### Test base64 encoding
-
-When the C# tool is run with `--base64`, the binary payload is encoded with standard base64 (`Convert.ToBase64String`) and split into the same 200-character chunk keys. This mode is intended for experimentation/comparison and is not consumed by the current minimal Portal runtime script.

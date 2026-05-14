@@ -17,7 +17,7 @@ Building this code has had to walk a fine line between all of these constraints 
 In order to use this tool ensure you have the latest .NET SDK installed, then you can use the following command:
 
 ```
-dotnet run -c Release --project portal-migrator <input.spatial.json> [output.bin] [--verbose] [--safe-base32] [--base64]
+dotnet run -c Release --project portal-migrator <input.spatial.json> [output.bin] [--verbose]
 ```
 
 | Argument | Description |
@@ -25,8 +25,6 @@ dotnet run -c Release --project portal-migrator <input.spatial.json> [output.bin
 | `<input.spatial.json>` | Path to the source spatial JSON file (required) |
 | `[output.bin]` | Output path for the raw binary file. Default: `output.bin` |
 | `--verbose` | Also write the raw binary file (without this flag, only `.strings.json` and `_filtered.spatial.json` are written) |
-| `--safe-base32` | Portal word-filter-safe output mode: write `.strings.json` using a no-letter custom base32 alphabet. Current `runtimeSpawn.ts` expects this mode by default. |
-| `--base64` | Test output mode: write `.strings.json` using base64. Not recommended for Portal because the website word filter can corrupt base64 text. |
 
 Exit codes:
 
@@ -64,7 +62,7 @@ Filtered JSON written to output_filtered.spatial.json
 
 | File | Description |
 |------|-------------|
-| `output.strings.json` | Binary spatial data encoded in custom base16 by default, split into 200-character chunks (`A0`, `A1`, ...). Use `--safe-base32` for Portal upload with the current minimal `runtimeSpawn.ts`; this avoids letters to reduce word-filter corruption. |
+| `output.strings.json` | Binary spatial data encoded in custom base16, split into 200-character chunks (`A0`, `A1`, ...). Read at runtime by `runtimeSpawn.ts`. |
 | `output_filtered.spatial.json` | Retained objects (incompressible — those with extra data, linked references, or explicitly skipped). These are authored manually in the spatial JSON and not handled by the binary system. |
 
 ### Object classification
