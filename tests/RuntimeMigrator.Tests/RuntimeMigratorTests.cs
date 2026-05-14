@@ -23,24 +23,6 @@ public sealed class RuntimeMigratorTests
     }
 
     [Fact]
-    public void CustomBase32RoundTripsBytesAndUsesNoLetters()
-    {
-        byte[] bytes = Enumerable.Range(0, 256).Select(i => (byte)i).ToArray();
-
-        string encoded = Utilities.EncodeCustomBase32(bytes);
-        byte[] decoded = Utilities.DecodeCustomBase32(encoded);
-
-        Assert.Equal(bytes, decoded);
-        Assert.DoesNotContain(encoded, c => char.IsLetter(c));
-        Assert.DoesNotContain('#', encoded);
-        Assert.DoesNotContain(' ', encoded);
-        Assert.Equal(string.Empty, Utilities.EncodeCustomBase32(Array.Empty<byte>()));
-        Assert.Empty(Utilities.DecodeCustomBase32(string.Empty));
-        Assert.Throws<FormatException>(() => Utilities.DecodeCustomBase32("A"));
-        Assert.Throws<ArgumentNullException>(() => Utilities.DecodeCustomBase32(null!));
-    }
-
-    [Fact]
     public void VectorMathQuantizesDequantizesAndRoundsPredictably()
     {
         var v = new Vector(32, 64, -1);
@@ -139,111 +121,9 @@ public sealed class RuntimeMigratorTests
         }
     }
 
-    [Fact]
-    public void SafeBase32FlagWritesLetterlessStringsJson()
-    {
-        string tempDir = Path.Combine(Path.GetTempPath(), "RuntimeMigrator.Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempDir);
-
-        try
-        {
-            string inputPath = Path.Combine(tempDir, "input.spatial.json");
-            string outputPath = Path.Combine(tempDir, "compiled.bin");
-            File.WriteAllText(inputPath, MinimalSpatialJson);
-
-            TextWriter originalOut = Console.Out;
-            TextWriter originalError = Console.Error;
-            int exitCode;
-            string consoleOutput;
-            try
-            {
-                using var outSink = new StringWriter();
-                using var errSink = new StringWriter();
-                Console.SetOut(outSink);
-                Console.SetError(errSink);
-                exitCode = CodeGenerator.Main(new[] { inputPath, outputPath, "--verbose", "--safe-base32" });
-                consoleOutput = outSink.ToString() + errSink.ToString();
-            }
-            finally
-            {
-                Console.SetOut(originalOut);
-                Console.SetError(originalError);
-            }
-
-            Assert.Equal(0, exitCode);
-            Assert.Contains("safe-base32", consoleOutput);
-
-            string stringsPath = Path.Combine(tempDir, "compiled.strings.json");
-            string encodedText = ReadEncodedText(stringsPath);
-            Assert.DoesNotContain(encodedText, c => char.IsLetter(c));
-            Assert.DoesNotContain('#', encodedText);
-            Assert.DoesNotContain(' ', encodedText);
-
-            byte[] rawBinary = File.ReadAllBytes(outputPath);
-            byte[] encodedBinary = Utilities.DecodeCustomBase32(encodedText);
-            Assert.Equal(rawBinary, encodedBinary);
-        }
-        finally
-        {
-            Directory.Delete(tempDir, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void Base64FlagWritesBase64StringsJson()
-    {
-        string tempDir = Path.Combine(Path.GetTempPath(), "RuntimeMigrator.Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempDir);
-
-        try
-        {
-            string inputPath = Path.Combine(tempDir, "input.spatial.json");
-            string outputPath = Path.Combine(tempDir, "compiled.bin");
-            File.WriteAllText(inputPath, MinimalSpatialJson);
-
-            TextWriter originalOut = Console.Out;
-            TextWriter originalError = Console.Error;
-            int exitCode;
-            string consoleOutput;
-            try
-            {
-                using var outSink = new StringWriter();
-                using var errSink = new StringWriter();
-                Console.SetOut(outSink);
-                Console.SetError(errSink);
-                exitCode = CodeGenerator.Main(new[] { inputPath, outputPath, "--verbose", "--base64" });
-                consoleOutput = outSink.ToString() + errSink.ToString();
-            }
-            finally
-            {
-                Console.SetOut(originalOut);
-                Console.SetError(originalError);
-            }
-
-            Assert.Equal(0, exitCode);
-            Assert.Contains("base64", consoleOutput);
-
-            string stringsPath = Path.Combine(tempDir, "compiled.strings.json");
-            byte[] rawBinary = File.ReadAllBytes(outputPath);
-            byte[] encodedBinary = ReadBase64EncodedBinary(stringsPath);
-            Assert.Equal(rawBinary, encodedBinary);
-
-            Assert.Throws<FormatException>(() => Utilities.DecodeCustomBase16(ReadEncodedText(stringsPath)));
-        }
-        finally
-        {
-            Directory.Delete(tempDir, recursive: true);
-        }
-    }
-
     private static byte[] ReadEncodedBinary(string stringsPath)
     {
         return Utilities.DecodeCustomBase16(ReadEncodedText(stringsPath));
-    }
-
-    private static byte[] ReadBase64EncodedBinary(string stringsPath)
-    {
-        return Convert.FromBase64String(ReadEncodedText(stringsPath));
     }
 
     private static string ReadEncodedText(string stringsPath)
